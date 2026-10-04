@@ -24,8 +24,8 @@
   header h1 { margin: 0; font-size: 18px; }
   #status { color: var(--muted); }
   #status b { color: var(--ink); }
-  .layout { display: grid; grid-template-columns: 340px 1fr; gap: 16px; padding: 16px 20px; align-items: start; }
-  .side { display: grid; gap: 16px; }
+  .layout { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 16px; padding: 16px 20px; align-items: start; }
+  .side { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; min-width: 0; }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
   .panel h2, .column h2 { margin: 0 0 10px; font-size: 13px; text-transform: uppercase;
                           letter-spacing: .04em; color: var(--muted); }
@@ -33,7 +33,35 @@
   .column { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px;
             min-height: 160px; display: flex; flex-direction: column; gap: 10px; }
   .column h2 .count { color: var(--ink); }
-  .empty { color: var(--muted); font-style: italic; }
+  .empty { color: var(--muted); font-style: italic; margin: 0; }
+  .mono { font-family: var(--mono); font-size: 12px; }
+  .muted { color: var(--muted); }
+  code { font-family: var(--mono); font-size: 12px; }
+  .error { color: var(--bad); font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 11.5px; font-weight: 600;
+          background: var(--chip); color: var(--muted); }
+  .pill.ok { color: var(--ok); } .pill.bad { color: var(--bad); } .pill.warn { color: var(--warn); }
+  button { font: inherit; font-size: 13px; padding: 5px 12px; border-radius: 7px; cursor: pointer;
+           border: 1px solid var(--line); background: var(--chip); color: var(--ink); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { color: var(--bad); }
+  button:disabled { opacity: .5; cursor: default; }
+  input[type=text], textarea, select { font: inherit; width: 100%; padding: 6px 8px; border-radius: 7px;
+           border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
+  textarea { font-family: var(--mono); font-size: 12px; resize: vertical; }
+  form { display: grid; gap: 8px; margin: 0; }
+  label.field { display: grid; gap: 3px; font-size: 12.5px; color: var(--muted); }
+  .server { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-bottom: 10px; }
+  .server-head { display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; }
+  .server-head .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .server-head .actions { margin-left: auto; display: flex; gap: 6px; }
+  .server-head .actions button { padding: 2px 9px; font-size: 12px; }
+  .server .command { margin: 4px 0 6px; overflow-wrap: anywhere; }
+  .tools { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+  .tools li { padding: 5px 8px; border-radius: 6px; background: var(--chip); }
+  .tools .tname { font-family: var(--mono); font-size: 12.5px; font-weight: 600; }
+  .tools .targs { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+  .tools .tdesc { font-size: 12.5px; color: var(--muted); }
   @media (max-width: 1100px) {
     .layout { grid-template-columns: 1fr; }
     .board { grid-template-columns: 1fr; }
@@ -52,6 +80,18 @@
       <h2>MCP servers</h2>
       <div id="servers"><p class="empty">No servers connected.</p></div>
     </section>
+
+    <section class="panel">
+      <h2>Connect an MCP server</h2>
+      <form id="connect-form">
+        <label class="field"><span>Command, run in the project folder (<code>python</code> = this project's Python)</span>
+          <input type="text" name="command" placeholder="python my_server.py" required autocomplete="off"></label>
+        <label class="field"><span>Name (optional)</span>
+          <input type="text" name="name" placeholder="from the server" autocomplete="off"></label>
+        <div><button class="primary" type="submit">Connect</button></div>
+        <div class="error" id="connect-error"></div>
+      </form>
+    </section>
   </div>
 
   <main class="board">
@@ -63,6 +103,88 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+let state = null;
+const seen = {};  // last rendered signature per section, to skip redraws that change nothing
+
+// h("div", {class: "x", onclick: fn}, child, "text", ...) -> element
+function h(tag, attrs = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === false || v == null) continue;
+    if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (k === "class") el.className = v;
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid);
+  return el;
+}
+
+function changed(key, value) {
+  const sig = JSON.stringify(value);
+  if (seen[key] === sig) return false;
+  seen[key] = sig;
+  return true;
+}
+
+async function api(method, url, body) {
+  const res = await fetch(url, {method, headers: {"Content-Type": "application/json"},
+                                body: body === undefined ? undefined : JSON.stringify(body)});
+  const data = res.status === 204 ? {} : await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || (data.detail && JSON.stringify(data.detail)) || res.statusText);
+  return data;
+}
+
+function argList(schema) {
+  const props = Object.keys((schema && schema.properties) || {});
+  const req = new Set((schema && schema.required) || []);
+  return props.map((p) => req.has(p) ? p : p + "?").join(", ");
+}
+
+function renderServers(servers) {
+  if (!changed("servers", servers)) return;
+  const box = $("servers");
+  box.replaceChildren();
+  if (!servers.length) box.append(h("p", {class: "empty"}, "No servers connected."));
+  for (const s of servers) {
+    const pill = {connected: "ok", disconnected: "bad", connecting: "warn"}[s.status] || "";
+    box.append(h("div", {class: "server"},
+      h("div", {class: "server-head"},
+        h("span", {class: "name"}, s.name),
+        h("span", {class: "pill " + pill}, s.status),
+        h("span", {class: "actions"},
+          s.status === "disconnected" && h("button", {onclick: (e) => serverAction(e, "POST", `/api/servers/${s.id}/reconnect`)}, "Reconnect"),
+          !s.builtin && h("button", {class: "danger", onclick: (e) => serverAction(e, "DELETE", `/api/servers/${s.id}`)}, "Remove"))),
+      h("div", {class: "command mono muted"}, "$ " + s.command),
+      s.error && h("div", {class: "error"}, s.error),
+      s.tools.length
+        ? h("ul", {class: "tools"}, s.tools.map((t) => h("li", {},
+            h("span", {class: "tname"}, t.name), " ", h("span", {class: "targs"}, "(" + argList(t.input_schema) + ")"),
+            t.description && h("div", {class: "tdesc"}, t.description))))
+        : h("p", {class: "empty"}, s.status === "connected" ? "This server offers no tools." : "No tools.")));
+  }
+}
+
+async function serverAction(e, method, url) {
+  e.target.disabled = true;
+  try { await api(method, url); } catch (err) { alertInline(err.message); }
+  refresh();
+}
+
+function alertInline(msg) { $("connect-error").textContent = msg; }
+
+$("connect-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = e.target, button = form.querySelector("button");
+  button.disabled = true; button.textContent = "Connecting…"; $("connect-error").textContent = "";
+  try {
+    await api("POST", "/api/servers", {command: form.elements.command.value, name: form.elements.namedItem("name").value});
+    form.reset();
+  } catch (err) {
+    $("connect-error").textContent = "Not connected: " + err.message;
+  }
+  button.disabled = false; button.textContent = "Connect";
+  refresh();
+});
 
 function renderStatus(s) {
   const connected = s.servers.filter((x) => x.status === "connected").length;
@@ -76,7 +198,9 @@ function renderStatus(s) {
 async function refresh() {
   try {
     const s = await (await fetch("/api/state")).json();
+    state = s;
     renderStatus(s);
+    renderServers(s.servers);
   } catch (e) {
     $("status").textContent = "host not reachable";
   }
