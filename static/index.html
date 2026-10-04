@@ -62,6 +62,38 @@
   .tools .tname { font-family: var(--mono); font-size: 12.5px; font-weight: 600; }
   .tools .targs { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
   .tools .tdesc { font-size: 12.5px; color: var(--muted); }
+  .runs { display: flex; flex-direction: column; gap: 10px; }
+  .runs:empty::before { content: attr(data-empty); color: var(--muted); font-style: italic; }
+  .toolpick { display: grid; gap: 8px; }
+  .toolpick fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 0; padding: 6px 10px 8px; }
+  .toolpick legend { font-size: 12px; color: var(--muted); padding: 0 4px; }
+  .toolpick label { display: flex; gap: 6px; align-items: center; font-family: var(--mono); font-size: 12.5px; padding: 2px 0; }
+  .run { border: 1px solid var(--line); border-radius: 9px; padding: 10px; background: var(--bg); display: grid; gap: 8px; }
+  .run.running { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+  .run-head { display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; }
+  .run-head .name { font-weight: 600; overflow-wrap: anywhere; }
+  .run-head .rid { color: var(--muted); font-size: 12px; }
+  .run-head .actions { margin-left: auto; display: flex; gap: 6px; }
+  .run-head .actions button { padding: 2px 9px; font-size: 12px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 4px; }
+  .chip { font-family: var(--mono); font-size: 11.5px; padding: 1px 7px; border-radius: 5px; background: var(--chip); }
+  .timing { font-size: 12.5px; color: var(--muted); }
+  .callform { display: grid; gap: 6px; padding: 8px; border-radius: 8px; border: 1px dashed var(--line); }
+  .callform .row { display: flex; gap: 6px; align-items: center; }
+  .callform .row select { flex: 1; min-width: 0; }
+  .callform .note { font-size: 12.5px; }
+  details.log > summary { cursor: pointer; font-size: 12.5px; color: var(--muted); }
+  .calls { display: grid; gap: 6px; margin-top: 6px; }
+  .call { border-left: 3px solid var(--line); padding: 4px 8px; background: var(--panel); border-radius: 0 6px 6px 0; min-width: 0; }
+  .call.ok { border-left-color: var(--ok); } .call.error { border-left-color: var(--warn); }
+  .call.rejected { border-left-color: var(--bad); } .call.pending { border-left-color: var(--accent); }
+  .call-head { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 12px; }
+  .call-head .tname { font-family: var(--mono); font-weight: 600; }
+  .call-head .when, .call-head .ms { color: var(--muted); }
+  .call .args, .call .out { font-family: var(--mono); font-size: 11.5px; white-space: pre-wrap; overflow-wrap: anywhere;
+                            max-height: 9em; overflow: auto; }
+  .call .args { color: var(--muted); }
+  .call .out.err { color: var(--bad); }
   @media (max-width: 1100px) {
     .layout { grid-template-columns: 1fr; }
     .board { grid-template-columns: 1fr; }
@@ -82,6 +114,18 @@
     </section>
 
     <section class="panel">
+      <h2>Start a run</h2>
+      <form id="run-form">
+        <label class="field"><span>Name</span>
+          <input type="text" name="runname" placeholder="my run" autocomplete="off"></label>
+        <div class="field"><span class="muted" style="font-size:12.5px">Tools this run may use</span>
+          <div class="toolpick" id="toolpick"><p class="empty">Connect a server first.</p></div></div>
+        <div><button class="primary" type="submit">Start run</button></div>
+        <div class="error" id="run-error"></div>
+      </form>
+    </section>
+
+    <section class="panel">
       <h2>Connect an MCP server</h2>
       <form id="connect-form">
         <label class="field"><span>Command, run in the project folder (<code>python</code> = this project's Python)</span>
@@ -95,9 +139,9 @@
   </div>
 
   <main class="board">
-    <section class="column"><h2>Waiting <span class="count" id="count-waiting">0</span></h2><div id="col-waiting"></div></section>
-    <section class="column"><h2>Running <span class="count" id="count-running">0</span></h2><div id="col-running"></div></section>
-    <section class="column"><h2>Done <span class="count" id="count-done">0</span></h2><div id="col-done"></div></section>
+    <section class="column"><h2>Waiting <span class="count" id="count-waiting">0</span></h2><div class="runs" id="col-waiting" data-empty="No runs waiting."></div></section>
+    <section class="column"><h2>Running <span class="count" id="count-running">0</span></h2><div class="runs" id="col-running" data-empty="No runs running."></div></section>
+    <section class="column"><h2>Done <span class="count" id="count-done">0</span></h2><div class="runs" id="col-done" data-empty="No finished runs yet."></div></section>
   </main>
 </div>
 
@@ -170,6 +214,202 @@ async function serverAction(e, method, url) {
   refresh();
 }
 
+// ---------------------------------------------------------------- start a run
+
+function connectedTools(s) {
+  return s.servers.filter((x) => x.status === "connected")
+    .map((x) => ({server: x.name, tools: x.tools.map((t) => ({...t, id: `${x.name}/${t.name}`}))}));
+}
+
+function renderToolPick(s) {
+  const groups = connectedTools(s);
+  if (!changed("toolpick", groups.map((g) => [g.server, g.tools.map((t) => t.name)]))) return;
+  const box = $("toolpick");
+  const checked = new Set([...box.querySelectorAll("input:checked")].map((i) => i.value));
+  box.replaceChildren();
+  if (!groups.length) box.append(h("p", {class: "empty"}, "Connect a server first."));
+  for (const g of groups) {
+    box.append(h("fieldset", {}, h("legend", {}, g.server),
+      g.tools.map((t) => h("label", {title: t.description},
+        h("input", {type: "checkbox", value: t.id, checked: checked.has(t.id)}), t.name))));
+  }
+}
+
+$("run-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = e.target, button = form.querySelector("button[type=submit]");
+  const tools = [...$("toolpick").querySelectorAll("input:checked")].map((i) => i.value);
+  button.disabled = true; $("run-error").textContent = "";
+  try {
+    await api("POST", "/api/runs", {name: form.elements.runname.value, tools});
+    form.elements.runname.value = "";
+  } catch (err) {
+    $("run-error").textContent = err.message;
+  }
+  button.disabled = false;
+  refresh();
+});
+
+// ---------------------------------------------------------------- runs
+
+const cards = new Map();  // run id -> {el, parts..., state, logSig, toolSig}
+
+function secs(t) { return Math.max(0, Math.round(t)) + " s"; }
+function clock(t) { return new Date(t * 1000).toLocaleTimeString([], {hour12: false}); }
+
+function schemaTemplate(schema) {
+  const out = {};
+  const props = (schema && schema.properties) || {};
+  for (const [k, p] of Object.entries(props)) {
+    const type = Array.isArray(p.type) ? p.type[0] : p.type;
+    out[k] = p.default !== undefined ? p.default
+      : {string: "", integer: 0, number: 0, boolean: false, array: [], object: {}}[type] ?? null;
+  }
+  return JSON.stringify(out, null, 1).replace(/\n\s*/g, " ");
+}
+
+function makeCard(r) {
+  const c = {state: null, logSig: null, toolSig: null, actionSig: null};
+  c.name = h("span", {class: "name"});
+  c.pill = h("span", {class: "pill"});
+  c.actions = h("span", {class: "actions"});
+  c.chips = h("div", {class: "chips"});
+  c.timing = h("div", {class: "timing"});
+  c.formSlot = h("div");
+  c.calls = h("div", {class: "calls"});
+  c.summary = h("summary");
+  c.log = h("details", {class: "log", open: r.state !== "done"}, c.summary, c.calls);
+  c.el = h("div", {class: "run"},
+    h("div", {class: "run-head"}, c.name, h("span", {class: "rid"}, "#" + r.id), c.pill, c.actions),
+    c.chips, c.timing, c.formSlot, c.log);
+  cards.set(r.id, c);
+  return c;
+}
+
+function makeCallForm(r, c) {
+  const select = h("select", {name: "tool"});
+  const args = h("textarea", {name: "arguments", rows: 2, spellcheck: "false"});
+  const note = h("div", {class: "note"});
+  const send = h("button", {class: "primary", type: "submit"}, "Send");
+  select.addEventListener("change", () => {
+    const t = c.toolInfo[select.value];
+    args.value = t ? schemaTemplate(t.input_schema) : "{}";
+  });
+  const form = h("form", {class: "callform"},
+    h("div", {class: "row"}, select, send), args, note);
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    let parsed;
+    try { parsed = args.value.trim() ? JSON.parse(args.value) : {}; }
+    catch (err) { note.className = "note error"; note.textContent = "Arguments are not valid JSON: " + err.message; return; }
+    send.disabled = true; note.className = "note muted"; note.textContent = "Calling…";
+    try {
+      const res = await fetch(`/api/runs/${r.id}/calls`, {method: "POST", headers: {"Content-Type": "application/json"},
+                              body: JSON.stringify({tool: select.value, arguments: parsed})});
+      const call = await res.json();
+      if (call.status === "ok") { note.className = "note"; note.textContent = "OK: " + (call.text || "(no content)"); }
+      else {
+        const why = call.error || call.detail || res.statusText;
+        note.className = "note error"; note.textContent = why.startsWith(call.status) ? why : `${call.status}: ${why}`;
+      }
+    } catch (err) { note.className = "note error"; note.textContent = err.message; }
+    send.disabled = false;
+    refresh();
+  });
+  c.select = select; c.args = args;
+  return form;
+}
+
+function fillToolSelect(r, c, s) {
+  // Every tool any connected server offers, so you can also see the host reject one.
+  const all = connectedTools(s).flatMap((g) => g.tools);
+  const sig = JSON.stringify([all.map((t) => t.id), r.tools]);
+  if (c.toolSig === sig) return;
+  c.toolSig = sig;
+  c.toolInfo = Object.fromEntries(all.map((t) => [t.id, t]));
+  const keep = c.select.value;
+  const allowed = all.filter((t) => r.tools.includes(t.id));
+  const others = all.filter((t) => !r.tools.includes(t.id));
+  c.select.replaceChildren(...[
+    allowed.length && h("optgroup", {label: "Allowed for this run"}, allowed.map((t) => h("option", {value: t.id}, t.id))),
+    others.length && h("optgroup", {label: "Not allowed (the host will reject)"}, others.map((t) => h("option", {value: t.id}, t.id))),
+  ].filter(Boolean));
+  if (keep && c.toolInfo[keep]) c.select.value = keep;
+  if (!keep) c.select.dispatchEvent(new Event("change"));
+}
+
+function renderCall(call) {
+  const verdict = call.allowed ? h("span", {class: "pill ok"}, "allowed") : h("span", {class: "pill bad"}, "rejected");
+  const status = call.allowed && h("span", {class: "pill " + ({ok: "ok", error: "warn", pending: ""}[call.status] || "")},
+                                   call.status === "pending" ? "waiting for server…" : call.status);
+  const out = call.status === "ok" ? h("div", {class: "out"}, call.text || "(no content)")
+    : call.error ? h("div", {class: "out err"}, call.error) : null;
+  return h("div", {class: "call " + call.status},
+    h("div", {class: "call-head"}, h("span", {class: "when"}, clock(call.at)), h("span", {class: "tname"}, call.tool),
+      verdict, status, call.ms != null && h("span", {class: "ms"}, call.ms + " ms")),
+    h("div", {class: "args"}, JSON.stringify(call.arguments)),
+    out);
+}
+
+async function runAction(e, url) {
+  e.target.disabled = true;
+  try { await api("POST", url); } catch (err) { $("run-error").textContent = err.message; }
+  refresh();
+}
+
+function updateCard(c, r, s) {
+  c.el.className = "run " + r.state;
+  c.name.textContent = r.name;
+  const pillClass = {running: "warn", waiting: "", done: {completed: "ok", failed: "bad", cancelled: ""}[r.outcome] || ""}[r.state];
+  c.pill.className = "pill " + pillClass;
+  c.pill.textContent = r.state === "done" ? r.outcome : r.state;
+
+  if (c.actionSig !== r.state) {
+    c.actionSig = r.state;
+    c.actions.replaceChildren(...[
+      r.state === "running" && h("button", {onclick: (e) => runAction(e, `/api/runs/${r.id}/finish`)}, "Finish"),
+    ].filter(Boolean));
+    c.chips.replaceChildren(...r.tools.map((t) => h("span", {class: "chip"}, t)));
+  }
+
+  if (r.state === "running") c.timing.textContent = `running for ${secs(s.now - r.started_at)}`;
+  else if (r.state === "done") c.timing.textContent = (r.reason ? r.reason + " · " : "") +
+    `ended ${clock(r.ended_at)}` + (r.started_at ? ` after ${secs(r.ended_at - r.started_at)}` : "");
+  else c.timing.textContent = "";
+
+  if (r.state === "running" && !c.form) { c.form = makeCallForm(r, c); c.formSlot.append(c.form); }
+  if (r.state !== "running" && c.form) { c.form.remove(); c.form = null; }
+  if (c.form) fillToolSelect(r, c, s);
+
+  if (c.state !== r.state) {
+    if (c.state && r.state === "done") c.log.open = false;  // tidy up finished runs
+    c.state = r.state;
+  }
+  const sig = JSON.stringify(r.calls.map((x) => [x.id, x.status]));
+  if (c.logSig !== sig) {
+    c.logSig = sig;
+    c.summary.textContent = r.calls.length ? `call log (${r.calls.length})` : "call log (empty)";
+    c.calls.replaceChildren(...[...r.calls].reverse().map(renderCall));
+  }
+}
+
+function renderRuns(s) {
+  const lists = {waiting: [], running: [], done: []};
+  for (const r of s.runs) lists[r.state].push(r);
+  lists.done.sort((a, b) => b.ended_at - a.ended_at);
+  const live = new Set(s.runs.map((r) => r.id));
+  for (const [state, runs] of Object.entries(lists)) {
+    const col = $("col-" + state);
+    runs.forEach((r, i) => {
+      const c = cards.get(r.id) || makeCard(r);
+      updateCard(c, r, s);
+      if (col.children[i] !== c.el) col.insertBefore(c.el, col.children[i] || null);
+    });
+    while (col.children.length > runs.length) col.lastChild.remove();
+  }
+  for (const id of [...cards.keys()]) if (!live.has(id)) { cards.get(id).el.remove(); cards.delete(id); }
+}
+
 function alertInline(msg) { $("connect-error").textContent = msg; }
 
 $("connect-form").addEventListener("submit", async (e) => {
@@ -201,6 +441,8 @@ async function refresh() {
     state = s;
     renderStatus(s);
     renderServers(s.servers);
+    renderToolPick(s);
+    renderRuns(s);
   } catch (e) {
     $("status").textContent = "host not reachable";
   }

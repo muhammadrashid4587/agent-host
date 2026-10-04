@@ -14,7 +14,7 @@ from pathlib import Path
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from host import Host, HostError
 
@@ -45,6 +45,16 @@ class NewServer(BaseModel):
     name: str = ""
 
 
+class NewRun(BaseModel):
+    name: str = ""
+    tools: list[str] = Field(description='the "server/tool" names this run may call')
+
+
+class ToolCall(BaseModel):
+    tool: str = Field(description='"server/tool", or a bare tool name if it is unambiguous')
+    arguments: object = Field(default_factory=dict)
+
+
 @app.get("/")
 def page():
     return FileResponse(HERE / "static" / "index.html")
@@ -53,7 +63,7 @@ def page():
 @app.get("/api/state")
 def state():
     """Everything the page shows, in one snapshot."""
-    return {"now": time.time(), "desk_limit": DESK_LIMIT, "runs": [], **host.snapshot()}
+    return {"now": time.time(), "desk_limit": DESK_LIMIT, **host.snapshot()}
 
 
 @app.get("/api/servers")
@@ -74,6 +84,41 @@ async def reconnect(server_id: int):
 @app.delete("/api/servers/{server_id}", status_code=204)
 async def remove_server(server_id: int):
     await host.remove(server_id)
+
+
+@app.get("/api/tools")
+def tools():
+    """Every "server/tool" a run could be allowed to use right now."""
+    return host.offered_tools()
+
+
+@app.get("/api/runs")
+def runs():
+    return [r.public() for r in host.runs.values()]
+
+
+@app.post("/api/runs", status_code=201)
+def create_run(body: NewRun):
+    return host.create_run(body.name, body.tools).public()
+
+
+@app.get("/api/runs/{run_id}")
+def get_run(run_id: int):
+    return host.get_run(run_id).public()
+
+
+@app.post("/api/runs/{run_id}/calls")
+async def call_tool(run_id: int, body: ToolCall):
+    """Ask the host to make one tool call for this run. The answer is the call's log entry;
+    the status is 200 if the tool ran, 403 if the run may not use it, 409 if the run is not
+    running, and 502 if the MCP server could not answer."""
+    call, status = await host.call(run_id, body.tool, body.arguments)
+    return JSONResponse(call.public(), status_code=status)
+
+
+@app.post("/api/runs/{run_id}/finish")
+def finish(run_id: int):
+    return host.finish(run_id).public()
 
 
 if __name__ == "__main__":
