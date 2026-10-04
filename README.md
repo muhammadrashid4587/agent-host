@@ -33,6 +33,11 @@ The host checks every call. A tool that was not ticked when the run started is r
 and never sent to the MCP server. An allowed call is forwarded to the server that offers the
 tool, and the result is logged.
 
+At most 2 runs are Running at once (the desk limit). New runs wait in Waiting and start in
+order as desks free up. **Cancel** stops a run, waiting or running. A run still running after
+60 seconds is marked failed. A call still waiting on a server when its run stops is cancelled,
+and the server is told so with `notifications/cancelled`.
+
 Guests (agents) use the same HTTP API as the page:
 
 | Method | Path | What it does |
@@ -43,8 +48,9 @@ Guests (agents) use the same HTTP API as the page:
 | GET | `/api/runs/{id}` | one run with its call log |
 | POST | `/api/runs/{id}/calls` | call a tool: `{"tool": "notes/add_note", "arguments": {...}}` |
 | POST | `/api/runs/{id}/finish` | mark the run done |
+| POST | `/api/runs/{id}/cancel` | cancel the run |
 | POST | `/api/servers` | connect a server: `{"command": "...", "name": "..."}` |
 
 A call answers with its log entry. The HTTP status is 200 if the tool ran (check `status` for
-`ok` or `error`), 403 if the run may not use that tool, 409 if the run is not running, and 502 if
+`ok` or `error`), 403 if the run may not use that tool, 409 if the run is not running (still waiting, or done), and 502 if
 the MCP server could not answer.

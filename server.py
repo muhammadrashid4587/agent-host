@@ -20,7 +20,6 @@ from host import Host, HostError
 
 HERE = Path(__file__).parent
 HOST, PORT = "127.0.0.1", 8000
-DESK_LIMIT = 2
 
 host = Host()
 
@@ -63,7 +62,7 @@ def page():
 @app.get("/api/state")
 def state():
     """Everything the page shows, in one snapshot."""
-    return {"now": time.time(), "desk_limit": DESK_LIMIT, **host.snapshot()}
+    return {"now": time.time(), **host.snapshot()}
 
 
 @app.get("/api/servers")
@@ -114,6 +113,11 @@ async def call_tool(run_id: int, body: ToolCall):
     running, and 502 if the MCP server could not answer."""
     call, status = await host.call(run_id, body.tool, body.arguments)
     return JSONResponse(call.public(), status_code=status)
+
+
+@app.post("/api/runs/{run_id}/cancel")
+def cancel(run_id: int):
+    return host.cancel(run_id).public()
 
 
 @app.post("/api/runs/{run_id}/finish")

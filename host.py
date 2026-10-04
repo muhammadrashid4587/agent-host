@@ -3,6 +3,7 @@ tool call a run makes."""
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import json
 import re
@@ -16,7 +17,8 @@ from mcp_client import Disconnected, MCPError, StdioClient
 
 HERE = Path(__file__).parent
 NOTES_COMMAND = "python notes_server.py"   # the sample server, connected on startup
-CALL_TIMEOUT = 60.0                         # seconds the host waits for a tool result
+DESK_LIMIT = 2         # runs that may be Running at once; the rest wait their turn
+RUN_TIMEOUT = 60.0     # a run still running after this many seconds is marked failed
 
 
 class HostError(Exception):
@@ -57,7 +59,7 @@ class Call:
     tool: str                   # "server/tool"
     arguments: object
     allowed: bool
-    status: str                 # pending | ok | error | rejected
+    status: str                 # pending | ok | error | rejected | cancelled
     result: dict | None = None  # the MCP tools/call result, as the server sent it
     error: str = ""
     ms: float | None = None
@@ -73,18 +75,20 @@ class Run:
     id: int
     name: str
     tools: list[str]            # the "server/tool" names this run may call
-    state: str = "running"      # running | done
-    outcome: str = ""           # once done: completed
+    state: str = "waiting"      # waiting | running | done
+    outcome: str = ""           # once done: completed | cancelled | failed
     reason: str = ""
     created_at: float = field(default_factory=time.time)
     started_at: float | None = None
     ended_at: float | None = None
     calls: list[Call] = field(default_factory=list)
+    stopped: asyncio.Event = field(default_factory=asyncio.Event, repr=False)  # set when done
 
     def public(self) -> dict:
         return {"id": self.id, "name": self.name, "tools": self.tools, "state": self.state,
                 "outcome": self.outcome, "reason": self.reason, "created_at": self.created_at,
                 "started_at": self.started_at, "ended_at": self.ended_at,
+                "deadline": self.started_at + RUN_TIMEOUT if self.state == "running" else None,
                 "calls": [c.public() for c in self.calls]}
 
 
@@ -132,10 +136,12 @@ class Host:
         self._server_ids = itertools.count(1)
         self._run_ids = itertools.count(1)
         self._call_ids = itertools.count(1)
+        self._watchdog: asyncio.Task | None = None
 
     # ------------------------------------------------------------------ lifecycle
 
     async def start(self) -> None:
+        self._watchdog = asyncio.create_task(self._watch_deadlines())
         notes = Server(next(self._server_ids), "notes", NOTES_COMMAND, builtin=True)
         self.servers[notes.id] = notes
         try:
@@ -144,6 +150,8 @@ class Host:
             pass  # stays on the page as disconnected, with the error
 
     async def stop(self) -> None:
+        if self._watchdog is not None:
+            self._watchdog.cancel()
         for server in self.servers.values():
             if server.client is not None:
                 await server.client.close()
@@ -237,8 +245,8 @@ class Host:
             raise HostError(f"no connected server offers {', '.join(unknown)}")
         rid = next(self._run_ids)
         run = Run(rid, name.strip()[:60] or f"run {rid}", tools)
-        run.started_at = time.time()
         self.runs[rid] = run
+        self._fill_desks()
         return run
 
     def finish(self, run_id: int) -> Run:
@@ -248,8 +256,35 @@ class Host:
         self._end(run, "completed", "finished by the guest")
         return run
 
+    def cancel(self, run_id: int) -> Run:
+        run = self.get_run(run_id)
+        if run.state == "done":
+            raise HostError(f"run {run_id} is already done", 409)
+        self._end(run, "cancelled", f"cancelled while {run.state}")
+        return run
+
     def _end(self, run: Run, outcome: str, reason: str) -> None:
         run.state, run.outcome, run.reason, run.ended_at = "done", outcome, reason, time.time()
+        run.stopped.set()  # interrupts any call still waiting on a server
+        self._fill_desks()
+
+    def _fill_desks(self) -> None:
+        """Move the oldest waiting runs to Running while a desk is free."""
+        running = sum(r.state == "running" for r in self.runs.values())
+        for run in sorted(self.runs.values(), key=lambda r: r.id):
+            if running >= DESK_LIMIT:
+                break
+            if run.state == "waiting":
+                run.state, run.started_at = "running", time.time()
+                running += 1
+
+    async def _watch_deadlines(self) -> None:
+        while True:
+            now = time.time()
+            for run in list(self.runs.values()):
+                if run.state == "running" and now - run.started_at >= RUN_TIMEOUT:
+                    self._end(run, "failed", f"timed out: still running after {RUN_TIMEOUT:g} s")
+            await asyncio.sleep(0.25)
 
     def get_run(self, run_id: int) -> Run:
         if run_id not in self.runs:
@@ -268,7 +303,7 @@ class Host:
 
         # The checks. A rejected call is logged and never reaches an MCP server.
         if run.state != "running":
-            call.error = f"rejected: run is {run.state}"
+            call.error = f"rejected: run is {run.state}" + (" for a desk" if run.state == "waiting" else "")
             return call, 409
         if "/" not in qualified:
             call.error = "rejected: unknown or ambiguous tool name, give it as server/tool"
@@ -288,8 +323,17 @@ class Host:
             return call, 502
 
         start = time.monotonic()
+        request = asyncio.ensure_future(server.client.call_tool(tool_name, arguments))
+        stopped = asyncio.ensure_future(run.stopped.wait())
         try:
-            result = await server.client.call_tool(tool_name, arguments, timeout=CALL_TIMEOUT)
+            # Wait for the server, but no longer than the run lives (cancel or timeout).
+            await asyncio.wait({request, stopped}, return_when=asyncio.FIRST_COMPLETED)
+            if not request.done():
+                request.cancel()  # the client tells the server with notifications/cancelled
+                await asyncio.gather(request, return_exceptions=True)
+                call.status, call.error = "cancelled", f"cancelled: run {run.outcome} ({run.reason})"
+                return call, 409
+            result = request.result()
         except MCPError as e:
             call.status, call.error = "error", f"server error: {e}"
             return call, 502
@@ -297,6 +341,7 @@ class Host:
             call.status, call.error = "error", str(e)
             return call, 502
         finally:
+            stopped.cancel()
             call.ms = round((time.monotonic() - start) * 1000, 1)
         call.result = result
         if result.get("isError"):
@@ -318,5 +363,6 @@ class Host:
     # ------------------------------------------------------------------ view
 
     def snapshot(self) -> dict:
-        return {"servers": [s.public() for s in self.servers.values()],
+        return {"desk_limit": DESK_LIMIT, "run_timeout": RUN_TIMEOUT,
+                "servers": [s.public() for s in self.servers.values()],
                 "runs": [r.public() for r in self.runs.values()]}

@@ -87,6 +87,7 @@
   .call { border-left: 3px solid var(--line); padding: 4px 8px; background: var(--panel); border-radius: 0 6px 6px 0; min-width: 0; }
   .call.ok { border-left-color: var(--ok); } .call.error { border-left-color: var(--warn); }
   .call.rejected { border-left-color: var(--bad); } .call.pending { border-left-color: var(--accent); }
+  .call.cancelled { border-left-color: var(--muted); }
   .call-head { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 12px; }
   .call-head .tname { font-family: var(--mono); font-weight: 600; }
   .call-head .when, .call-head .ms { color: var(--muted); }
@@ -340,7 +341,7 @@ function fillToolSelect(r, c, s) {
 
 function renderCall(call) {
   const verdict = call.allowed ? h("span", {class: "pill ok"}, "allowed") : h("span", {class: "pill bad"}, "rejected");
-  const status = call.allowed && h("span", {class: "pill " + ({ok: "ok", error: "warn", pending: ""}[call.status] || "")},
+  const status = call.allowed && h("span", {class: "pill " + ({ok: "ok", error: "warn", pending: "", cancelled: ""}[call.status] || "")},
                                    call.status === "pending" ? "waiting for server…" : call.status);
   const out = call.status === "ok" ? h("div", {class: "out"}, call.text || "(no content)")
     : call.error ? h("div", {class: "out err"}, call.error) : null;
@@ -368,14 +369,17 @@ function updateCard(c, r, s) {
     c.actionSig = r.state;
     c.actions.replaceChildren(...[
       r.state === "running" && h("button", {onclick: (e) => runAction(e, `/api/runs/${r.id}/finish`)}, "Finish"),
+      r.state !== "done" && h("button", {class: "danger", onclick: (e) => runAction(e, `/api/runs/${r.id}/cancel`)}, "Cancel"),
     ].filter(Boolean));
     c.chips.replaceChildren(...r.tools.map((t) => h("span", {class: "chip"}, t)));
   }
 
-  if (r.state === "running") c.timing.textContent = `running for ${secs(s.now - r.started_at)}`;
+  if (r.state === "running") c.timing.textContent =
+    `running for ${secs(s.now - r.started_at)} · fails if still running in ${secs(r.deadline - s.now)}`;
+  else if (r.state === "waiting") c.timing.textContent =
+    `waiting for a desk · #${s.runs.filter((x) => x.state === "waiting" && x.id <= r.id).length} in line`;
   else if (r.state === "done") c.timing.textContent = (r.reason ? r.reason + " · " : "") +
     `ended ${clock(r.ended_at)}` + (r.started_at ? ` after ${secs(r.ended_at - r.started_at)}` : "");
-  else c.timing.textContent = "";
 
   if (r.state === "running" && !c.form) { c.form = makeCallForm(r, c); c.formSlot.append(c.form); }
   if (r.state !== "running" && c.form) { c.form.remove(); c.form = null; }
@@ -397,6 +401,7 @@ function renderRuns(s) {
   const lists = {waiting: [], running: [], done: []};
   for (const r of s.runs) lists[r.state].push(r);
   lists.done.sort((a, b) => b.ended_at - a.ended_at);
+  lists.running.sort((a, b) => a.started_at - b.started_at);
   const live = new Set(s.runs.map((r) => r.id));
   for (const [state, runs] of Object.entries(lists)) {
     const col = $("col-" + state);
