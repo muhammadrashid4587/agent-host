@@ -1,0 +1,10 @@
+[project]
+name = "agent-host"
+version = "0.1.0"
+description = "A small host that runs MCP servers and lets runs call only the tools they were allowed."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi>=0.142.2",
+    "uvicorn>=0.54.0",
+]
