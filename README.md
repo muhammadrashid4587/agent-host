@@ -12,6 +12,13 @@ uv run python server.py
 
 Then open http://127.0.0.1:8000
 
+In a second terminal, run the demo guest. It starts a run allowed to use the notes tools, adds a
+note, lists the notes, reads the note back and finishes, all through the host's HTTP API:
+
+```sh
+uv run python demo_client.py
+```
+
 ## MCP servers
 
 The host speaks MCP over stdio (`initialize`, `tools/list`, `tools/call`). On startup it connects
@@ -54,3 +61,10 @@ Guests (agents) use the same HTTP API as the page:
 A call answers with its log entry. The HTTP status is 200 if the tool ran (check `status` for
 `ok` or `error`), 403 if the run may not use that tool, 409 if the run is not running (still waiting, or done), and 502 if
 the MCP server could not answer.
+
+## Storage
+
+Servers, runs and call logs are saved in `agent_host.sqlite` next to `server.py`, so refreshing
+the page or restarting the host keeps the board. On restart the host reconnects the saved servers.
+Runs that were running are marked failed, since their guests and calls are gone, and waiting runs
+keep their place in line. Delete the file to start fresh. Set `AGENT_HOST_DB` to use another path.

@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
+import os
 import re
 import shlex
 import sys
@@ -14,9 +15,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from mcp_client import Disconnected, MCPError, StdioClient
+from store import Store
 
 HERE = Path(__file__).parent
 NOTES_COMMAND = "python notes_server.py"   # the sample server, connected on startup
+DB_PATH = Path(os.environ.get("AGENT_HOST_DB", HERE / "agent_host.sqlite"))
 DESK_LIMIT = 2         # runs that may be Running at once; the rest wait their turn
 RUN_TIMEOUT = 60.0     # a run still running after this many seconds is marked failed
 
@@ -130,31 +133,85 @@ def clean_name(name: str) -> str:
 
 
 class Host:
-    def __init__(self):
+    def __init__(self, db_path: Path = DB_PATH):
+        self.db_path = db_path
+        self.store: Store | None = None
         self.servers: dict[int, Server] = {}
         self.runs: dict[int, Run] = {}
         self._server_ids = itertools.count(1)
         self._run_ids = itertools.count(1)
         self._call_ids = itertools.count(1)
         self._watchdog: asyncio.Task | None = None
+        self._background: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------ lifecycle
 
     async def start(self) -> None:
+        self.store = Store(self.db_path)
+        self._load()
         self._watchdog = asyncio.create_task(self._watch_deadlines())
-        notes = Server(next(self._server_ids), "notes", NOTES_COMMAND, builtin=True)
-        self.servers[notes.id] = notes
+        notes = next((s for s in self.servers.values() if s.builtin), None)
+        if notes is None:
+            notes = Server(next(self._server_ids), "notes", NOTES_COMMAND, builtin=True)
+            self.servers[notes.id] = notes
         try:
             await self._open(notes)
         except HostError:
             pass  # stays on the page as disconnected, with the error
+        # Reconnect the servers a person added before, without holding up the page.
+        for server in self.servers.values():
+            if not server.builtin:
+                task = asyncio.create_task(self._reopen_quietly(server))
+                self._background.add(task)
+                task.add_done_callback(self._background.discard)
 
     async def stop(self) -> None:
         if self._watchdog is not None:
             self._watchdog.cancel()
+        for task in list(self._background):
+            task.cancel()
         for server in self.servers.values():
             if server.client is not None:
                 await server.client.close()
+        if self.store is not None:
+            self.store.close()
+
+    def _load(self) -> None:
+        """Put the board back the way it was. Runs that were running when the host stopped
+        are marked failed, since their guests and in-flight calls are gone."""
+        for row in self.store.servers():
+            server = Server(row["id"], row["name"], row["command"], row["builtin"], "disconnected",
+                            row["error"], row["tools"], row["info"])
+            self.servers[server.id] = server
+        for row in self.store.runs():
+            run = Run(row["id"], row["name"], row["tools"], row["state"], row["outcome"], row["reason"],
+                      row["created_at"], row["started_at"], row["ended_at"])
+            self.runs[run.id] = run
+        for row in self.store.calls():
+            run = self.runs.get(row["run_id"])
+            if run is not None:
+                run.calls.append(Call(**row))
+        restarted = time.time()
+        for run in self.runs.values():
+            if run.state == "running":
+                run.state, run.outcome, run.ended_at = "done", "failed", restarted
+                run.reason = "the host restarted while it was running"
+                run.stopped.set()
+                self.store.save_run(run)
+            for call in run.calls:
+                if call.status == "pending":
+                    call.status, call.error = "error", "the host restarted before the server answered"
+                    self.store.save_call(call)
+        self._server_ids = itertools.count(max(self.servers, default=0) + 1)
+        self._run_ids = itertools.count(max(self.runs, default=0) + 1)
+        self._call_ids = itertools.count(max((c.id for r in self.runs.values() for c in r.calls), default=0) + 1)
+        self._fill_desks()
+
+    async def _reopen_quietly(self, server: Server) -> None:
+        try:
+            await self._open(server)
+        except HostError:
+            pass  # shown on the page with its error and a Reconnect button
 
     # ------------------------------------------------------------------ servers
 
@@ -165,11 +222,12 @@ class Host:
         if wanted and self._name_taken(wanted):
             raise HostError(f"there is already a server called {wanted!r}")
         server = Server(next(self._server_ids), wanted or "server", command.strip())
-        await self._open(server)
+        await self._open(server, save=False)
         if not wanted:
             server.name = self._unique_name(clean_name(server.info.get("name", "")) or
                                             clean_name(Path(argv_for(command)[-1]).stem) or "server")
         self.servers[server.id] = server
+        self.store.save_server(server)
         return server
 
     async def reconnect(self, server_id: int) -> Server:
@@ -186,9 +244,11 @@ class Host:
         if server.client is not None:
             await server.client.close()
         del self.servers[server_id]
+        self.store.delete_server(server_id)
 
-    async def _open(self, server: Server) -> None:
-        """Start the server process and do the MCP handshake."""
+    async def _open(self, server: Server, save: bool = True) -> None:
+        """Start the server process and do the MCP handshake. save=False for a server that
+        is not on the board yet (it is only kept if the handshake works)."""
         argv = argv_for(server.command)
         if server.builtin:
             argv = [sys.executable, str(HERE / "notes_server.py")]
@@ -200,19 +260,27 @@ class Host:
             await client.start()
         except Disconnected as e:
             server.status, server.error = "disconnected", str(e)
+            if save:
+                self.store.save_server(server)
             raise HostError(f"{server.command}: {e}") from None
         server.client = client
         server.tools = client.tools
         server.info = {**client.server_info, "protocol": client.protocol_version}
         server.status = "connected"
+        if save:
+            self.store.save_server(server)
 
     def _lost(self, server: Server, client: StdioClient, reason: str) -> None:
         if server.client is client:
             server.client = None
             server.status, server.error = "disconnected", reason
+            if server.id in self.servers:
+                self.store.save_server(server)
 
     def _tools_changed(self, server: Server, tools: list[dict]) -> None:
         server.tools = tools
+        if server.id in self.servers:
+            self.store.save_server(server)
 
     def _server(self, server_id: int) -> Server:
         if server_id not in self.servers:
@@ -246,6 +314,7 @@ class Host:
         rid = next(self._run_ids)
         run = Run(rid, name.strip()[:60] or f"run {rid}", tools)
         self.runs[rid] = run
+        self.store.save_run(run)
         self._fill_desks()
         return run
 
@@ -266,6 +335,7 @@ class Host:
     def _end(self, run: Run, outcome: str, reason: str) -> None:
         run.state, run.outcome, run.reason, run.ended_at = "done", outcome, reason, time.time()
         run.stopped.set()  # interrupts any call still waiting on a server
+        self.store.save_run(run)
         self._fill_desks()
 
     def _fill_desks(self) -> None:
@@ -276,6 +346,7 @@ class Host:
                 break
             if run.state == "waiting":
                 run.state, run.started_at = "running", time.time()
+                self.store.save_run(run)
                 running += 1
 
     async def _watch_deadlines(self) -> None:
@@ -300,28 +371,36 @@ class Host:
         qualified = self._qualify(run, str(tool).strip())
         call = Call(next(self._call_ids), run.id, time.time(), qualified, arguments, allowed=False, status="rejected")
         run.calls.append(call)
+        try:
+            return call, await self._check_and_forward(run, call)
+        finally:
+            self.store.save_call(call)  # the call's final state, whatever happened
 
+    async def _check_and_forward(self, run: Run, call: Call) -> int:
+        """Fill in the call's outcome; returns the HTTP status for it."""
+        qualified, arguments = call.tool, call.arguments
         # The checks. A rejected call is logged and never reaches an MCP server.
         if run.state != "running":
             call.error = f"rejected: run is {run.state}" + (" for a desk" if run.state == "waiting" else "")
-            return call, 409
+            return 409
         if "/" not in qualified:
             call.error = "rejected: unknown or ambiguous tool name, give it as server/tool"
-            return call, 403
+            return 403
         if qualified not in run.tools:
             call.error = "rejected: this run was not allowed to use this tool"
-            return call, 403
+            return 403
         if not isinstance(arguments, dict):
             call.error = "rejected: arguments must be a JSON object"
-            return call, 400
+            return 400
 
         call.allowed, call.status = True, "pending"
         server_name, tool_name = qualified.split("/", 1)
         server = next((s for s in self.servers.values() if s.name == server_name), None)
         if server is None or server.status != "connected" or server.client is None:
             call.status, call.error = "error", f"server {server_name} is not connected"
-            return call, 502
+            return 502
 
+        self.store.save_call(call)  # logged as pending while the server works
         start = time.monotonic()
         request = asyncio.ensure_future(server.client.call_tool(tool_name, arguments))
         stopped = asyncio.ensure_future(run.stopped.wait())
@@ -332,14 +411,18 @@ class Host:
                 request.cancel()  # the client tells the server with notifications/cancelled
                 await asyncio.gather(request, return_exceptions=True)
                 call.status, call.error = "cancelled", f"cancelled: run {run.outcome} ({run.reason})"
-                return call, 409
+                return 409
             result = request.result()
         except MCPError as e:
             call.status, call.error = "error", f"server error: {e}"
-            return call, 502
+            return 502
         except (Disconnected, TimeoutError) as e:
             call.status, call.error = "error", str(e)
-            return call, 502
+            return 502
+        except asyncio.CancelledError:  # the host is shutting down
+            request.cancel()
+            call.status, call.error = "cancelled", "the host shut down before the server answered"
+            raise
         finally:
             stopped.cancel()
             call.ms = round((time.monotonic() - start) * 1000, 1)
@@ -348,7 +431,7 @@ class Host:
             call.status, call.error = "error", result_text(result) or "the tool reported an error"
         else:
             call.status = "ok"
-        return call, 200
+        return 200
 
     def _qualify(self, run: Run, tool: str) -> str:
         """Accept "server/tool", or a bare tool name when it is unambiguous."""
@@ -362,7 +445,11 @@ class Host:
 
     # ------------------------------------------------------------------ view
 
-    def snapshot(self) -> dict:
+    def snapshot(self, done_shown: int = 50) -> dict:
+        """What the page shows: every server, every waiting or running run, and the most
+        recent finished runs (older ones stay in the database and at /api/runs/{id})."""
+        done = sorted((r for r in self.runs.values() if r.state == "done"), key=lambda r: r.ended_at or 0)
+        hidden = {r.id for r in done[:-done_shown]} if len(done) > done_shown else set()
         return {"desk_limit": DESK_LIMIT, "run_timeout": RUN_TIMEOUT,
                 "servers": [s.public() for s in self.servers.values()],
-                "runs": [r.public() for r in self.runs.values()]}
+                "runs": [r.public() for r in self.runs.values() if r.id not in hidden]}
