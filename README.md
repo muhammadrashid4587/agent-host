@@ -68,3 +68,13 @@ Servers, runs and call logs are saved in `agent_host.sqlite` next to `server.py`
 the page or restarting the host keeps the board. On restart the host reconnects the saved servers.
 Runs that were running are marked failed, since their guests and calls are gone, and waiting runs
 keep their place in line. Delete the file to start fresh. Set `AGENT_HOST_DB` to use another path.
+
+## Tests
+
+```sh
+uv run pytest
+```
+
+The tests start a real host on a temporary database with the notes server and a spy MCP server
+(`tests/spy_server.py`) that writes down every call it receives. That is how they check that a
+rejected call never reaches a server, along with the desk limit, cancel, the timeout and restarts.
