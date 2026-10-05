@@ -127,6 +127,19 @@ async def get_run(run_id: int):
     return host.get_run(run_id).public()
 
 
+@app.get("/api/runs/{run_id}/export")
+async def export_run(run_id: int):
+    """The run and its whole call log as a JSON file download."""
+    return JSONResponse(host.export(run_id),
+                        headers={"Content-Disposition": f'attachment; filename="agent-host-run-{run_id}.json"'})
+
+
+@app.get("/api/stats")
+async def stats():
+    """Per tool: calls, ok, errors, rejected, cancelled and the average time the server took."""
+    return host.stats()
+
+
 @app.post("/api/runs/{run_id}/calls")
 async def call_tool(run_id: int, body: ToolCall):
     """Ask the host to make one tool call for this run. The answer is the call's log entry;

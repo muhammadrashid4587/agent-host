@@ -24,6 +24,16 @@
   header h1 { margin: 0; font-size: 18px; }
   #status { color: var(--muted); }
   #status b { color: var(--ink); }
+  #filter { margin-left: auto; width: 240px; }
+  .stats { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .stats th { text-align: right; font-weight: 600; color: var(--muted); padding: 2px 4px; }
+  .stats th:first-child, .stats td:first-child { text-align: left; }
+  .stats td { text-align: right; padding: 3px 4px; border-top: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+  .stats td:first-child { font-family: var(--mono); overflow-wrap: anywhere; }
+  .stats .bad { color: var(--bad); } .stats .warn { color: var(--warn); }
+  .run.hidden { display: none; }
+  a.button { font-size: 12px; padding: 2px 9px; border-radius: 7px; border: 1px solid var(--line);
+             background: var(--chip); color: var(--ink); text-decoration: none; }
   .layout { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 16px; padding: 16px 20px; align-items: start; }
   .side { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; min-width: 0; }
   .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
@@ -108,6 +118,7 @@
 <header>
   <h1>agent-host</h1>
   <div id="status">connecting…</div>
+  <input type="text" id="filter" placeholder="Filter runs by name or tool" autocomplete="off">
 </header>
 
 <div class="layout">
@@ -133,6 +144,11 @@
         <div><button class="primary" type="submit">Start run</button></div>
         <div class="error" id="run-error"></div>
       </form>
+    </section>
+
+    <section class="panel">
+      <h2>Tool activity</h2>
+      <div id="stats"><p class="empty">No calls yet.</p></div>
     </section>
 
     <section class="panel">
@@ -381,6 +397,7 @@ function updateCard(c, r, s) {
     c.actions.replaceChildren(...[
       r.state === "running" && h("button", {onclick: (e) => runAction(e, `/api/runs/${r.id}/finish`)}, "Finish"),
       r.state !== "done" && h("button", {class: "danger", onclick: (e) => runAction(e, `/api/runs/${r.id}/cancel`)}, "Cancel"),
+      h("a", {class: "button", href: `/api/runs/${r.id}/export`, title: "Download this run and its call log as JSON"}, "Export"),
       r.state === "done" && h("button", {title: "Start a new run with the same tools and limits",
         onclick: (e) => runAction(e, "/api/runs", {name: r.name, tools: r.tools, max_calls: r.max_calls, timeout: r.timeout})}, "Run again"),
     ].filter(Boolean));
@@ -412,8 +429,26 @@ function updateCard(c, r, s) {
   }
 }
 
+function matches(r, q) {
+  if (!q) return true;
+  return [r.name, "#" + r.id, ...r.tools, ...r.calls.map((c) => c.tool)].some((t) => t.toLowerCase().includes(q));
+}
+
+function renderStats(stats) {
+  if (!changed("stats", stats)) return;
+  const box = $("stats");
+  if (!stats.length) return box.replaceChildren(h("p", {class: "empty"}, "No calls yet."));
+  const n = (v, cls) => h("td", {class: v ? cls : ""}, String(v));
+  box.replaceChildren(h("table", {class: "stats"},
+    h("tr", {}, ["tool", "calls", "ok", "error", "rejected", "avg"].map((t) => h("th", {}, t))),
+    stats.map((t) => h("tr", {title: `cancelled ${t.cancelled}, waiting ${t.pending}, last ${clock(t.last_at)}`},
+      h("td", {}, t.tool), n(t.calls), n(t.ok), n(t.error, "warn"), n(t.rejected, "bad"),
+      h("td", {}, t.avg_ms == null ? "–" : t.avg_ms + " ms")))));
+}
+
 function renderRuns(s) {
   const lists = {waiting: [], running: [], done: []};
+  const q = $("filter").value.trim().toLowerCase();
   for (const r of s.runs) lists[r.state].push(r);
   lists.done.sort((a, b) => b.ended_at - a.ended_at);
   lists.running.sort((a, b) => a.started_at - b.started_at);
@@ -423,6 +458,7 @@ function renderRuns(s) {
     runs.forEach((r, i) => {
       const c = cards.get(r.id) || makeCard(r);
       updateCard(c, r, s);
+      c.el.classList.toggle("hidden", !matches(r, q));
       if (col.children[i] !== c.el) col.insertBefore(c.el, col.children[i] || null);
     });
     while (col.children.length > runs.length) col.lastChild.remove();
@@ -463,8 +499,11 @@ function render(s) {
   renderStatus(s);
   renderServers(s.servers);
   renderToolPick(s);
+  renderStats(s.stats);
   renderRuns(s);
 }
+
+$("filter").addEventListener("input", () => { if (state) renderRuns(state); });
 
 // The host pushes a fresh snapshot over server-sent events whenever something changes.
 // refresh() is still used right after our own actions, and as the fallback if events fail.

@@ -52,6 +52,11 @@ order as desks free up. **Cancel** stops a run, waiting or running. A run still 
 its timeout (60 seconds unless it picked another) is marked failed. A call still waiting on a server when its run stops is cancelled,
 and the server is told so with `notifications/cancelled`.
 
+**Tool activity** on the page counts every tool's calls across all runs: how many went through, how
+many failed, how many the host rejected, and how long the server took on average. The box at the
+top filters the board by run name, run number or tool. **Export** on a run card downloads that run
+with its whole call log as JSON.
+
 Guests (agents) use the same HTTP API as the page:
 
 | Method | Path | What it does |
@@ -62,6 +67,8 @@ Guests (agents) use the same HTTP API as the page:
 | POST | `/api/runs` | start a run: `{"name": "...", "tools": ["notes/add_note", ...]}`, optionally with `"max_calls"` and `"timeout"` |
 | GET | `/api/runs/{id}` | one run with its call log |
 | POST | `/api/runs/{id}/calls` | call a tool: `{"tool": "notes/add_note", "arguments": {...}}` |
+| GET | `/api/runs/{id}/export` | download the run and its call log as JSON |
+| GET | `/api/stats` | per tool: calls, ok, errors, rejected, cancelled, average time |
 | POST | `/api/runs/{id}/finish` | mark the run done |
 | POST | `/api/runs/{id}/cancel` | cancel the run |
 | POST | `/api/servers` | connect a server: `{"command": "...", "name": "..."}` |

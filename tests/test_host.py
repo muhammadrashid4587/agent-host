@@ -167,3 +167,26 @@ async def test_changes_wake_live_pages(host):
     host.create_run("r", ["spy/echo"])
     await asyncio.wait_for(waiter, 1)
     assert host.version > seen
+
+
+async def test_stats_count_calls_per_tool(host):
+    run = host.create_run("r", ["spy/echo", "notes/read_note"])
+    await host.call(run.id, "spy/echo", {"text": "a"})
+    await host.call(run.id, "spy/echo", {"text": "b"})
+    await host.call(run.id, "spy/secret", {"text": "c"})
+    await host.call(run.id, "notes/read_note", {"id": 404})
+    stats = {t["tool"]: t for t in host.stats()}
+    assert (stats["spy/echo"]["calls"], stats["spy/echo"]["ok"]) == (2, 2)
+    assert stats["spy/echo"]["avg_ms"] is not None
+    assert stats["spy/secret"]["rejected"] == 1 and stats["spy/secret"]["avg_ms"] is None
+    assert stats["notes/read_note"]["error"] == 1
+    assert host.stats()[0]["tool"] == "spy/echo"  # busiest first
+
+
+async def test_export_has_the_whole_log(host):
+    run = host.create_run("r", ["spy/echo"])
+    await host.call(run.id, "spy/echo", {"text": "a"})
+    data = host.export(run.id)
+    assert data["run"]["id"] == run.id and data["run"]["calls"][0]["text"] == "a"
+    with pytest.raises(HostError):
+        host.export(999)

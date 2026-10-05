@@ -484,6 +484,27 @@ class Host:
 
     # ------------------------------------------------------------------ view
 
+    def stats(self) -> list[dict]:
+        """Per tool, over every run's call log: how often it was called and how that went."""
+        by_tool: dict[str, dict] = {}
+        for run in self.runs.values():
+            for c in run.calls:
+                t = by_tool.setdefault(c.tool, {"tool": c.tool, "calls": 0, "ok": 0, "error": 0, "rejected": 0,
+                                                "cancelled": 0, "pending": 0, "avg_ms": None, "last_at": 0, "_ms": []})
+                t["calls"] += 1
+                t[c.status] = t.get(c.status, 0) + 1
+                t["last_at"] = max(t["last_at"], c.at)
+                if c.ms is not None and c.status in ("ok", "error"):
+                    t["_ms"].append(c.ms)
+        for t in by_tool.values():
+            ms = t.pop("_ms")
+            t["avg_ms"] = round(sum(ms) / len(ms), 1) if ms else None
+        return sorted(by_tool.values(), key=lambda t: (-t["calls"], t["tool"]))
+
+    def export(self, run_id: int) -> dict:
+        """One run with its whole call log, to save as a file."""
+        return {"exported_at": time.time(), "host": "agent-host", "run": self.get_run(run_id).public()}
+
     def snapshot(self, done_shown: int = 50) -> dict:
         """What the page shows: every server, every waiting or running run, and the most
         recent finished runs (older ones stay in the database and at /api/runs/{id})."""
@@ -491,4 +512,5 @@ class Host:
         hidden = {r.id for r in done[:-done_shown]} if len(done) > done_shown else set()
         return {"desk_limit": DESK_LIMIT, "run_timeout": RUN_TIMEOUT,
                 "servers": [s.public() for s in self.servers.values()],
+                "stats": self.stats(),
                 "runs": [r.public() for r in self.runs.values() if r.id not in hidden]}
