@@ -455,21 +455,34 @@ function renderStatus(s) {
   for (const st of ["waiting", "running", "done"]) $("count-" + st).textContent = count(st);
 }
 
-async function refresh() {
-  try {
-    const s = await (await fetch("/api/state")).json();
-    state = s;
-    renderStatus(s);
-    renderServers(s.servers);
-    renderToolPick(s);
-    renderRuns(s);
-  } catch (e) {
-    $("status").textContent = "host not reachable";
-  }
+let skew = 0;  // host clock minus ours, so countdowns tick between updates
+
+function render(s) {
+  state = s;
+  skew = s.now - Date.now() / 1000;
+  renderStatus(s);
+  renderServers(s.servers);
+  renderToolPick(s);
+  renderRuns(s);
 }
 
+// The host pushes a fresh snapshot over server-sent events whenever something changes.
+// refresh() is still used right after our own actions, and as the fallback if events fail.
+async function refresh() {
+  try { render(await (await fetch("/api/state")).json()); }
+  catch (e) { $("status").textContent = "host not reachable"; }
+}
+
+let live = false;
+const events = new EventSource("/api/events");
+events.onmessage = (e) => { live = true; render(JSON.parse(e.data)); };
+events.onerror = () => { live = false; };  // the browser retries on its own
+
 refresh();
-setInterval(refresh, 1000);
+setInterval(() => {
+  if (!live) return refresh();
+  if (state) { state.now = Date.now() / 1000 + skew; renderRuns(state); }  // tick the clocks
+}, 1000);
 </script>
 </body>
 </html>

@@ -12,6 +12,8 @@ uv run python server.py
 
 Then open http://127.0.0.1:8000
 
+The page updates live: the host pushes every change to it over server-sent events.
+
 In a second terminal, run the demo guest. It starts a run allowed to use the notes tools, adds a
 note, lists the notes, reads the note back and finishes, all through the host's HTTP API:
 
@@ -55,6 +57,7 @@ Guests (agents) use the same HTTP API as the page:
 | Method | Path | What it does |
 | --- | --- | --- |
 | GET | `/api/state` | servers, their tools, runs and call logs |
+| GET | `/api/events` | the same snapshot as server-sent events, pushed whenever anything changes |
 | GET | `/api/tools` | every `server/tool` a run can be allowed |
 | POST | `/api/runs` | start a run: `{"name": "...", "tools": ["notes/add_note", ...]}`, optionally with `"max_calls"` and `"timeout"` |
 | GET | `/api/runs/{id}` | one run with its call log |

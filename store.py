@@ -52,7 +52,8 @@ ADDED_COLUMNS = {
 
 
 class Store:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, on_write=None):
+        self.on_write = on_write or (lambda: None)  # told after every save, so pages can update
         self.db = sqlite3.connect(path, isolation_level=None)  # autocommit: every save lands at once
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -75,9 +76,11 @@ class Store:
             "command=excluded.command, status=excluded.status, error=excluded.error, "
             "tools=excluded.tools, info=excluded.info",
             (s.id, s.name, s.command, int(s.builtin), s.status, s.error, json.dumps(s.tools), json.dumps(s.info)))
+        self.on_write()
 
     def delete_server(self, server_id: int) -> None:
         self.db.execute("DELETE FROM servers WHERE id = ?", (server_id,))
+        self.on_write()
 
     def save_run(self, r) -> None:
         self.db.execute(
@@ -86,6 +89,7 @@ class Store:
             "outcome=excluded.outcome, reason=excluded.reason, started_at=excluded.started_at, "
             "ended_at=excluded.ended_at",
             (r.id, r.name, json.dumps(r.tools), r.max_calls, r.timeout, r.state, r.outcome, r.reason, r.created_at, r.started_at, r.ended_at))
+        self.on_write()
 
     def save_call(self, c) -> None:
         self.db.execute(
@@ -94,6 +98,7 @@ class Store:
             "status=excluded.status, result=excluded.result, error=excluded.error, ms=excluded.ms",
             (c.id, c.run_id, c.at, c.tool, json.dumps(c.arguments), int(c.allowed), c.status,
              None if c.result is None else json.dumps(c.result), c.error, c.ms))
+        self.on_write()
 
     # ------------------------------------------------------------------ reads
 

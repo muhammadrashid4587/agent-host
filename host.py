@@ -151,11 +151,14 @@ class Host:
         self._call_ids = itertools.count(1)
         self._watchdog: asyncio.Task | None = None
         self._background: set[asyncio.Task] = set()
+        self.version = 0                      # goes up on every change, for live pages
+        self._changed = asyncio.Event()
+        self.closing = False
 
     # ------------------------------------------------------------------ lifecycle
 
     async def start(self) -> None:
-        self.store = Store(self.db_path)
+        self.store = Store(self.db_path, on_write=self.touch)
         self._load()
         self._watchdog = asyncio.create_task(self._watch_deadlines())
         notes = next((s for s in self.servers.values() if s.builtin), None)
@@ -174,6 +177,8 @@ class Host:
                 task.add_done_callback(self._background.discard)
 
     async def stop(self) -> None:
+        self.closing = True
+        self.touch()  # lets live pages' streams end
         if self._watchdog is not None:
             self._watchdog.cancel()
         for task in list(self._background):
@@ -214,6 +219,21 @@ class Host:
         self._run_ids = itertools.count(max(self.runs, default=0) + 1)
         self._call_ids = itertools.count(max((c.id for r in self.runs.values() for c in r.calls), default=0) + 1)
         self._fill_desks()
+
+    def touch(self) -> None:
+        """Note that something on the board changed and wake whoever waits for it."""
+        self.version += 1
+        self._changed.set()
+        self._changed = asyncio.Event()
+
+    async def wait_for_change(self, seen: int, timeout: float) -> None:
+        """Return once the version is past `seen`, or after `timeout` seconds."""
+        if self.version != seen:
+            return
+        try:
+            await asyncio.wait_for(self._changed.wait(), timeout)
+        except TimeoutError:
+            pass
 
     async def _reopen_quietly(self, server: Server) -> None:
         try:
@@ -261,6 +281,7 @@ class Host:
         if server.builtin:
             argv = [sys.executable, str(HERE / "notes_server.py")]
         server.status, server.error = "connecting", ""
+        self.touch()
         client = StdioClient(argv, cwd=str(HERE),
                              on_exit=lambda reason: self._lost(server, client, reason),
                              on_tools_changed=lambda tools: self._tools_changed(server, tools))

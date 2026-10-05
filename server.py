@@ -7,13 +7,15 @@ Then open http://127.0.0.1:8000
 
 from __future__ import annotations
 
+import asyncio
+import json
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from host import Host, HostError
@@ -65,6 +67,23 @@ async def page():
 async def state():
     """Everything the page shows, in one snapshot."""
     return {"now": time.time(), **host.snapshot()}
+
+
+@app.get("/api/events")
+async def events():
+    """Server-sent events: the same snapshot as /api/state, sent again whenever it changes."""
+    async def stream():
+        seen = -1
+        while not host.closing:
+            if host.version == seen:
+                yield ": still here\n\n"  # keeps proxies and the browser from giving up
+            else:
+                seen = host.version
+                yield f"data: {json.dumps({'now': time.time(), **host.snapshot()})}\n\n"
+            await host.wait_for_change(seen, timeout=15)
+            await asyncio.sleep(0.05)  # gather a burst of changes into one message
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.get("/api/servers")

@@ -157,3 +157,13 @@ async def test_limits_survive_a_restart(tmp_path, spy_log):
         assert (h2.runs[run.id].max_calls, h2.runs[run.id].timeout) == (3, 30)
     finally:
         await h2.stop()
+
+
+async def test_changes_wake_live_pages(host):
+    seen = host.version
+    waiter = asyncio.create_task(host.wait_for_change(seen, timeout=5))
+    await asyncio.sleep(0.05)
+    assert not waiter.done()
+    host.create_run("r", ["spy/echo"])
+    await asyncio.wait_for(waiter, 1)
+    assert host.version > seen
