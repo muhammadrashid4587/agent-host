@@ -116,3 +116,44 @@ async def test_restart_keeps_the_board(tmp_path, spy_log):
         assert "spy/echo" in h2.offered_tools()
     finally:
         await h2.stop()
+
+
+async def test_call_limit_rejects_calls_past_the_budget(host, spy_log):
+    run = host.create_run("r", ["spy/echo"], max_calls=2)
+    await host.call(run.id, "spy/secret", {"text": "rejected calls don't count"})
+    for text in ("one", "two"):
+        _, status = await host.call(run.id, "spy/echo", {"text": text})
+        assert status == 200
+    call, status = await host.call(run.id, "spy/echo", {"text": "three"})
+    assert status == 429 and call.status == "rejected" and "all 2" in call.error
+    assert [c["arguments"]["text"] for c in spy_log()] == ["one", "two"]
+    assert run.public()["used_calls"] == 2
+
+
+async def test_run_picks_its_own_timeout(host):
+    run = host.create_run("r", ["spy/echo"], timeout=1)
+    assert run.public()["deadline"] == pytest.approx(run.started_at + 1)
+    await asyncio.wait_for(run.stopped.wait(), 3)
+    assert run.outcome == "failed" and "after 1 s" in run.reason
+
+
+async def test_limits_are_checked(host):
+    with pytest.raises(HostError):
+        host.create_run("r", ["spy/echo"], max_calls=0)
+    with pytest.raises(HostError):
+        host.create_run("r", ["spy/echo"], timeout=10_000)
+
+
+async def test_limits_survive_a_restart(tmp_path, spy_log):
+    db = tmp_path / "limits.sqlite"
+    h = Host(db)
+    await h.start()
+    run = h.create_run("r", ["notes/list_notes"], max_calls=3, timeout=30)
+    h.finish(run.id)
+    await h.stop()
+    h2 = Host(db)
+    await h2.start()
+    try:
+        assert (h2.runs[run.id].max_calls, h2.runs[run.id].timeout) == (3, 30)
+    finally:
+        await h2.stop()

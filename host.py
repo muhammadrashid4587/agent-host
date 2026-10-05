@@ -22,6 +22,7 @@ NOTES_COMMAND = "python notes_server.py"   # the sample server, connected on sta
 DB_PATH = Path(os.environ.get("AGENT_HOST_DB", HERE / "agent_host.sqlite"))
 DESK_LIMIT = 2         # runs that may be Running at once; the rest wait their turn
 RUN_TIMEOUT = 60.0     # a run still running after this many seconds is marked failed
+TIMEOUT_RANGE = (1.0, 600.0)  # the timeout a run may ask for instead
 
 
 class HostError(Exception):
@@ -78,6 +79,8 @@ class Run:
     id: int
     name: str
     tools: list[str]            # the "server/tool" names this run may call
+    max_calls: int | None = None  # how many calls the host forwards for it; None = no limit
+    timeout: float = RUN_TIMEOUT  # seconds it may stay running
     state: str = "waiting"      # waiting | running | done
     outcome: str = ""           # once done: completed | cancelled | failed
     reason: str = ""
@@ -88,11 +91,16 @@ class Run:
     stopped: asyncio.Event = field(default_factory=asyncio.Event, repr=False)  # set when done
 
     def public(self) -> dict:
-        return {"id": self.id, "name": self.name, "tools": self.tools, "state": self.state,
+        return {"id": self.id, "name": self.name, "tools": self.tools, "max_calls": self.max_calls,
+                "timeout": self.timeout, "used_calls": self.used_calls(), "state": self.state,
                 "outcome": self.outcome, "reason": self.reason, "created_at": self.created_at,
                 "started_at": self.started_at, "ended_at": self.ended_at,
-                "deadline": self.started_at + RUN_TIMEOUT if self.state == "running" else None,
+                "deadline": self.started_at + self.timeout if self.state == "running" else None,
                 "calls": [c.public() for c in self.calls]}
+
+    def used_calls(self) -> int:
+        """Calls the host forwarded (or tried to) for this run; rejected ones don't count."""
+        return sum(c.allowed for c in self.calls)
 
 
 def result_text(result: dict | None) -> str:
@@ -184,8 +192,8 @@ class Host:
                             row["error"], row["tools"], row["info"])
             self.servers[server.id] = server
         for row in self.store.runs():
-            run = Run(row["id"], row["name"], row["tools"], row["state"], row["outcome"], row["reason"],
-                      row["created_at"], row["started_at"], row["ended_at"])
+            run = Run(row["id"], row["name"], row["tools"], row["max_calls"], row["timeout"], row["state"],
+                      row["outcome"], row["reason"], row["created_at"], row["started_at"], row["ended_at"])
             self.runs[run.id] = run
         for row in self.store.calls():
             run = self.runs.get(row["run_id"])
@@ -303,7 +311,8 @@ class Host:
 
     # ------------------------------------------------------------------ runs
 
-    def create_run(self, name: str, tools: list[str]) -> Run:
+    def create_run(self, name: str, tools: list[str], max_calls: int | None = None,
+                   timeout: float | None = None) -> Run:
         offered = self.offered_tools()
         tools = list(dict.fromkeys(t.strip() for t in tools if t.strip()))
         if not tools:
@@ -311,8 +320,14 @@ class Host:
         unknown = [t for t in tools if t not in offered]
         if unknown:
             raise HostError(f"no connected server offers {', '.join(unknown)}")
+        if max_calls is not None and max_calls < 1:
+            raise HostError("the call limit must be at least 1, or left empty for no limit")
+        timeout = RUN_TIMEOUT if timeout is None else float(timeout)
+        low, high = TIMEOUT_RANGE
+        if not low <= timeout <= high:
+            raise HostError(f"the timeout must be between {low:g} and {high:g} seconds")
         rid = next(self._run_ids)
-        run = Run(rid, name.strip()[:60] or f"run {rid}", tools)
+        run = Run(rid, name.strip()[:60] or f"run {rid}", tools, max_calls, timeout)
         self.runs[rid] = run
         self.store.save_run(run)
         self._fill_desks()
@@ -353,8 +368,8 @@ class Host:
         while True:
             now = time.time()
             for run in list(self.runs.values()):
-                if run.state == "running" and now - run.started_at >= RUN_TIMEOUT:
-                    self._end(run, "failed", f"timed out: still running after {RUN_TIMEOUT:g} s")
+                if run.state == "running" and now - run.started_at >= run.timeout:
+                    self._end(run, "failed", f"timed out: still running after {run.timeout:g} s")
             await asyncio.sleep(0.25)
 
     def get_run(self, run_id: int) -> Run:
@@ -392,6 +407,9 @@ class Host:
         if not isinstance(arguments, dict):
             call.error = "rejected: arguments must be a JSON object"
             return 400
+        if run.max_calls is not None and run.used_calls() >= run.max_calls:
+            call.error = f"rejected: the run has used all {run.max_calls} of its calls"
+            return 429
 
         call.allowed, call.status = True, "pending"
         server_name, tool_name = qualified.split("/", 1)

@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,
     tools TEXT NOT NULL,                -- allowed "server/tool" names, as JSON
+    max_calls INTEGER,                  -- NULL = no limit
+    timeout REAL NOT NULL DEFAULT 60,
     state TEXT NOT NULL,
     outcome TEXT NOT NULL DEFAULT '',
     reason TEXT NOT NULL DEFAULT '',
@@ -43,6 +45,11 @@ CREATE TABLE IF NOT EXISTS calls (
 CREATE INDEX IF NOT EXISTS calls_by_run ON calls(run_id);
 """
 
+# Columns added after the first release, for databases made before them.
+ADDED_COLUMNS = {
+    "runs": {"max_calls": "INTEGER", "timeout": "REAL NOT NULL DEFAULT 60"},
+}
+
 
 class Store:
     def __init__(self, path: Path):
@@ -50,6 +57,11 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
+        for table, columns in ADDED_COLUMNS.items():
+            have = {row["name"] for row in self.db.execute(f"PRAGMA table_info({table})")}
+            for name, decl in columns.items():
+                if name not in have:
+                    self.db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
     def close(self) -> None:
         self.db.close()
@@ -69,11 +81,11 @@ class Store:
 
     def save_run(self, r) -> None:
         self.db.execute(
-            "INSERT INTO runs (id, name, tools, state, outcome, reason, created_at, started_at, ended_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET state=excluded.state, "
+            "INSERT INTO runs (id, name, tools, max_calls, timeout, state, outcome, reason, created_at, "
+            "started_at, ended_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET state=excluded.state, "
             "outcome=excluded.outcome, reason=excluded.reason, started_at=excluded.started_at, "
             "ended_at=excluded.ended_at",
-            (r.id, r.name, json.dumps(r.tools), r.state, r.outcome, r.reason, r.created_at, r.started_at, r.ended_at))
+            (r.id, r.name, json.dumps(r.tools), r.max_calls, r.timeout, r.state, r.outcome, r.reason, r.created_at, r.started_at, r.ended_at))
 
     def save_call(self, c) -> None:
         self.db.execute(

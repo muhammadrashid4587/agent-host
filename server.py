@@ -47,6 +47,8 @@ class NewServer(BaseModel):
 class NewRun(BaseModel):
     name: str = ""
     tools: list[str] = Field(description='the "server/tool" names this run may call')
+    max_calls: int | None = Field(None, description="how many calls the host forwards for the run; empty = no limit")
+    timeout: float | None = Field(None, description="seconds the run may stay running (default 60)")
 
 
 class ToolCall(BaseModel):
@@ -98,7 +100,7 @@ async def runs():
 
 @app.post("/api/runs", status_code=201)
 async def create_run(body: NewRun):
-    return host.create_run(body.name, body.tools).public()
+    return host.create_run(body.name, body.tools, body.max_calls, body.timeout).public()
 
 
 @app.get("/api/runs/{run_id}")
@@ -110,7 +112,7 @@ async def get_run(run_id: int):
 async def call_tool(run_id: int, body: ToolCall):
     """Ask the host to make one tool call for this run. The answer is the call's log entry;
     the status is 200 if the tool ran, 403 if the run may not use it, 409 if the run is not
-    running, and 502 if the MCP server could not answer."""
+    running, 429 if it used up its calls, and 502 if the MCP server could not answer."""
     call, status = await host.call(run_id, body.tool, body.arguments)
     return JSONResponse(call.public(), status_code=status)
 

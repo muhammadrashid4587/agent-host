@@ -40,9 +40,14 @@ The host checks every call. A tool that was not ticked when the run started is r
 and never sent to the MCP server. An allowed call is forwarded to the server that offers the
 tool, and the result is logged.
 
+A run can also get limits when it starts. **Call limit** is how many calls the host will forward
+for it; past that, calls are rejected (rejected calls don't count toward it). **Timeout** is how many
+seconds it may stay running, from 1 to 600, 60 by default. A finished run has **Run again**, which
+starts a new run with the same tools and limits.
+
 At most 2 runs are Running at once (the desk limit). New runs wait in Waiting and start in
 order as desks free up. **Cancel** stops a run, waiting or running. A run still running after
-60 seconds is marked failed. A call still waiting on a server when its run stops is cancelled,
+its timeout (60 seconds unless it picked another) is marked failed. A call still waiting on a server when its run stops is cancelled,
 and the server is told so with `notifications/cancelled`.
 
 Guests (agents) use the same HTTP API as the page:
@@ -51,7 +56,7 @@ Guests (agents) use the same HTTP API as the page:
 | --- | --- | --- |
 | GET | `/api/state` | servers, their tools, runs and call logs |
 | GET | `/api/tools` | every `server/tool` a run can be allowed |
-| POST | `/api/runs` | start a run: `{"name": "...", "tools": ["notes/add_note", ...]}` |
+| POST | `/api/runs` | start a run: `{"name": "...", "tools": ["notes/add_note", ...]}`, optionally with `"max_calls"` and `"timeout"` |
 | GET | `/api/runs/{id}` | one run with its call log |
 | POST | `/api/runs/{id}/calls` | call a tool: `{"tool": "notes/add_note", "arguments": {...}}` |
 | POST | `/api/runs/{id}/finish` | mark the run done |
@@ -59,7 +64,7 @@ Guests (agents) use the same HTTP API as the page:
 | POST | `/api/servers` | connect a server: `{"command": "...", "name": "..."}` |
 
 A call answers with its log entry. The HTTP status is 200 if the tool ran (check `status` for
-`ok` or `error`), 403 if the run may not use that tool, 409 if the run is not running (still waiting, or done), and 502 if
+`ok` or `error`), 403 if the run may not use that tool, 409 if the run is not running (still waiting, or done), 429 if it used up its call limit, and 502 if
 the MCP server could not answer.
 
 ## Storage

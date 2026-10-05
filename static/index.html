@@ -51,6 +51,9 @@
   textarea { font-family: var(--mono); font-size: 12px; resize: vertical; }
   form { display: grid; gap: 8px; margin: 0; }
   label.field { display: grid; gap: 3px; font-size: 12.5px; color: var(--muted); }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  input[type=number] { font: inherit; width: 100%; padding: 6px 8px; border-radius: 7px;
+           border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
   .server { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-bottom: 10px; }
   .server-head { display: flex; align-items: center; gap: 6px 8px; flex-wrap: wrap; }
   .server-head .name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -119,6 +122,12 @@
       <form id="run-form">
         <label class="field"><span>Name</span>
           <input type="text" name="runname" placeholder="my run" autocomplete="off"></label>
+        <div class="pair">
+          <label class="field"><span>Call limit</span>
+            <input type="number" name="max_calls" min="1" step="1" placeholder="no limit"></label>
+          <label class="field"><span>Timeout (s)</span>
+            <input type="number" name="timeout" min="1" max="600" step="1" placeholder="60"></label>
+        </div>
         <div class="field"><span class="muted" style="font-size:12.5px">Tools this run may use</span>
           <div class="toolpick" id="toolpick"><p class="empty">Connect a server first.</p></div></div>
         <div><button class="primary" type="submit">Start run</button></div>
@@ -242,7 +251,9 @@ $("run-form").addEventListener("submit", async (e) => {
   const tools = [...$("toolpick").querySelectorAll("input:checked")].map((i) => i.value);
   button.disabled = true; $("run-error").textContent = "";
   try {
-    await api("POST", "/api/runs", {name: form.elements.runname.value, tools});
+    const num = (el) => el.value.trim() === "" ? null : Number(el.value);
+    await api("POST", "/api/runs", {name: form.elements.runname.value, tools,
+                                    max_calls: num(form.elements.max_calls), timeout: num(form.elements.timeout)});
     form.elements.runname.value = "";
   } catch (err) {
     $("run-error").textContent = err.message;
@@ -352,9 +363,9 @@ function renderCall(call) {
     out);
 }
 
-async function runAction(e, url) {
+async function runAction(e, url, body) {
   e.target.disabled = true;
-  try { await api("POST", url); } catch (err) { $("run-error").textContent = err.message; }
+  try { await api("POST", url, body); } catch (err) { $("run-error").textContent = err.message; }
   refresh();
 }
 
@@ -370,16 +381,20 @@ function updateCard(c, r, s) {
     c.actions.replaceChildren(...[
       r.state === "running" && h("button", {onclick: (e) => runAction(e, `/api/runs/${r.id}/finish`)}, "Finish"),
       r.state !== "done" && h("button", {class: "danger", onclick: (e) => runAction(e, `/api/runs/${r.id}/cancel`)}, "Cancel"),
+      r.state === "done" && h("button", {title: "Start a new run with the same tools and limits",
+        onclick: (e) => runAction(e, "/api/runs", {name: r.name, tools: r.tools, max_calls: r.max_calls, timeout: r.timeout})}, "Run again"),
     ].filter(Boolean));
     c.chips.replaceChildren(...r.tools.map((t) => h("span", {class: "chip"}, t)));
   }
 
+  const budget = r.max_calls != null ? ` · calls ${r.used_calls}/${r.max_calls}` : "";
   if (r.state === "running") c.timing.textContent =
-    `running for ${secs(s.now - r.started_at)} · fails if still running in ${secs(r.deadline - s.now)}`;
+    `running for ${secs(s.now - r.started_at)} · fails if still running in ${secs(r.deadline - s.now)}` + budget;
   else if (r.state === "waiting") c.timing.textContent =
-    `waiting for a desk · #${s.runs.filter((x) => x.state === "waiting" && x.id <= r.id).length} in line`;
+    `waiting for a desk · #${s.runs.filter((x) => x.state === "waiting" && x.id <= r.id).length} in line · ` +
+    `${r.timeout} s once it starts` + budget;
   else if (r.state === "done") c.timing.textContent = (r.reason ? r.reason + " · " : "") +
-    `ended ${clock(r.ended_at)}` + (r.started_at ? ` after ${secs(r.ended_at - r.started_at)}` : "");
+    `ended ${clock(r.ended_at)}` + (r.started_at ? ` after ${secs(r.ended_at - r.started_at)}` : "") + budget;
 
   if (r.state === "running" && !c.form) { c.form = makeCallForm(r, c); c.formSlot.append(c.form); }
   if (r.state !== "running" && c.form) { c.form.remove(); c.form = null; }
